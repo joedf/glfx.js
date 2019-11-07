@@ -11,6 +11,8 @@ header = '''/*
  * http://evanw.github.com/glfx.js/
  *
  * Copyright 2011 Evan Wallace
+ * Copyright 2014 Pierre-Loic Doulcet (hexapode)
+ * Copyright 2019 Joachim de Fourestier (joedf)
  * Released under the MIT license
  */
 '''

@@ -3,12 +3,147 @@
  * http://evanw.github.com/glfx.js/
  *
  * Copyright 2011 Evan Wallace
+ * Copyright 2014 Pierre-Loic Doulcet (hexapode)
+ * Copyright 2019 Joachim de Fourestier (joedf)
  * Released under the MIT license
  */
 var fx = (function() {
 var exports = {};
 
-// src/core/canvas.js
+// src/OES_texture_float_linear-polyfill.js
+// From: https://github.com/evanw/OES_texture_float_linear-polyfill
+(function() {
+  // Uploads a 2x2 floating-point texture where one pixel is 2 and the other
+  // three pixels are 0. Linear filtering is only supported if a sample taken
+  // from the center of that texture is (2 + 0 + 0 + 0) / 4 = 0.5.
+  function supportsOESTextureFloatLinear(gl) {
+    // Need floating point textures in the first place
+    if (!gl.getExtension('OES_texture_float')) {
+      return false;
+    }
+
+    // Create a render target
+    var framebuffer = gl.createFramebuffer();
+    var byteTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, byteTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, byteTexture, 0);
+
+    // Create a simple floating-point texture with value of 0.5 in the center
+    var rgba = [
+      2, 0, 0, 0,
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+      0, 0, 0, 0
+    ];
+    var floatTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, floatTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.FLOAT, new Float32Array(rgba));
+
+    // Create the test shader
+    var program = gl.createProgram();
+    var vertexShader = gl.createShader(gl.VERTEX_SHADER);
+    var fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(vertexShader, '\
+      attribute vec2 vertex;\
+      void main() {\
+        gl_Position = vec4(vertex, 0.0, 1.0);\
+      }\
+    ');
+    gl.shaderSource(fragmentShader, '\
+      uniform sampler2D texture;\
+      void main() {\
+        gl_FragColor = texture2D(texture, vec2(0.5));\
+      }\
+    ');
+    gl.compileShader(vertexShader);
+    gl.compileShader(fragmentShader);
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+
+    // Create a buffer containing a single point
+    var buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0]), gl.STREAM_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    // Render the point and read back the rendered pixel
+    var pixel = new Uint8Array(4);
+    gl.useProgram(program);
+    gl.viewport(0, 0, 1, 1);
+    gl.bindTexture(gl.TEXTURE_2D, floatTexture);
+    gl.drawArrays(gl.POINTS, 0, 1);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+
+    // The center sample will only have a value of 0.5 if linear filtering works
+    return pixel[0] === 127 || pixel[0] === 128;
+  }
+
+  // The constructor for the returned extension object
+  function OESTextureFloatLinear() {
+  }
+
+  // Cache the extension so it's specific to each context like extensions should be
+  function getOESTextureFloatLinear(gl) {
+    if (gl.$OES_texture_float_linear$ === void 0) {
+      Object.defineProperty(gl, '$OES_texture_float_linear$', {
+        enumerable: false,
+        configurable: false,
+        writable: false,
+        value: new OESTextureFloatLinear()
+      });
+    }
+    return gl.$OES_texture_float_linear$;
+  }
+
+  // This replaces the real getExtension()
+  function getExtension(name) {
+    return name === 'OES_texture_float_linear'
+      ? getOESTextureFloatLinear(this)
+      : oldGetExtension.call(this, name);
+  }
+
+  // This replaces the real getSupportedExtensions()
+  function getSupportedExtensions() {
+    var extensions = oldGetSupportedExtensions.call(this);
+    if (extensions.indexOf('OES_texture_float_linear') === -1) {
+      extensions.push('OES_texture_float_linear');
+    }
+    return extensions;
+  }
+
+  // Get a WebGL context
+  try {
+    var gl = document.createElement('canvas').getContext('experimental-webgl');
+  } catch (e) {
+  }
+
+  // Don't install the polyfill if the browser already supports it or doesn't have WebGL
+  if (!gl || gl.getSupportedExtensions().indexOf('OES_texture_float_linear') !== -1) {
+    return;
+  }
+
+  // Install the polyfill if linear filtering works with floating-point textures
+  if (supportsOESTextureFloatLinear(gl)) {
+    var oldGetExtension = WebGLRenderingContext.prototype.getExtension;
+    var oldGetSupportedExtensions = WebGLRenderingContext.prototype.getSupportedExtensions;
+    WebGLRenderingContext.prototype.getExtension = getExtension;
+    WebGLRenderingContext.prototype.getSupportedExtensions = getSupportedExtensions;
+  }
+}());
+
+// src/core\canvas.js
 var gl;
 
 function clamp(lo, value, hi) {
@@ -18,8 +153,16 @@ function clamp(lo, value, hi) {
 function wrapTexture(texture) {
     return {
         _: texture,
-        loadContentsOf: function(element) { this._.loadContentsOf(element); },
-        destroy: function() { this._.destroy(); }
+        loadContentsOf: function(element) {
+            // Make sure that we're using the correct global WebGL context
+            gl = this._.gl;
+            this._.loadContentsOf(element);
+        },
+        destroy: function() {
+            // Make sure that we're using the correct global WebGL context
+            gl = this._.gl;
+            this._.destroy();
+        }
     };
 }
 
@@ -28,8 +171,21 @@ function texture(element) {
 }
 
 function initialize(width, height) {
-    // Go for floating point buffer textures if we can, it'll make the bokeh filter look a lot better
-    var type = gl.getExtension('OES_texture_float') ? gl.FLOAT : gl.UNSIGNED_BYTE;
+    var type = gl.UNSIGNED_BYTE;
+
+    // Go for floating point buffer textures if we can, it'll make the bokeh
+    // filter look a lot better. Note that on Windows, ANGLE does not let you
+    // render to a floating-point texture when linear filtering is enabled.
+    // See http://crbug.com/172278 for more information.
+    if (gl.getExtension('OES_texture_float') && gl.getExtension('OES_texture_float_linear')) {
+        var testTexture = new Texture(100, 100, gl.RGBA, gl.FLOAT);
+        try {
+            // Only use gl.FLOAT if we can render to it
+            testTexture.drawTo(function() { type = gl.FLOAT; });
+        } catch (e) {
+        }
+        testTexture.destroy();
+    }
 
     if (this._.texture) this._.texture.destroy();
     if (this._.spareTexture) this._.spareTexture.destroy();
@@ -109,23 +265,6 @@ function getPixelArray() {
     return array;
 }
 
-// Fix broken toDataURL() methods on some implementations
-function toDataURL(mimeType) {
-    var w = this._.texture.width;
-    var h = this._.texture.height;
-    var array = getPixelArray.call(this);
-    var canvas2d = document.createElement('canvas');
-    var c = canvas2d.getContext('2d');
-    canvas2d.width = w;
-    canvas2d.height = h;
-    var data = c.createImageData(w, h);
-    for (var i = 0; i < array.length; i++) {
-        data.data[i] = array[i];
-    }
-    c.putImageData(data, 0, 0);
-    return canvas2d.toDataURL(mimeType);
-}
-
 function wrap(func) {
     return function() {
         // Make sure that we're using the correct global WebGL context
@@ -161,7 +300,6 @@ exports.canvas = function() {
     canvas.replace = wrap(replace);
     canvas.contents = wrap(contents);
     canvas.getPixelArray = wrap(getPixelArray);
-    canvas.toDataURL = wrap(toDataURL);
 
     // Filter methods
     canvas.brightnessContrast = wrap(brightnessContrast);
@@ -204,7 +342,7 @@ exports.canvas = function() {
 };
 exports.splineInterpolate = splineInterpolate;
 
-// src/core/matrix.js
+// src/core\matrix.js
 // from javax.media.jai.PerspectiveTransform
 
 function getSquareToQuad(x0, y0, x1, y1, x2, y2, x3, y3) {
@@ -250,7 +388,7 @@ function multiply(a, b) {
     ];
 }
 
-// src/core/shader.js
+// src/core\shader.js
 var Shader = (function() {
     function isArray(obj) {
         return Object.prototype.toString.call(obj) == '[object Array]';
@@ -386,7 +524,7 @@ var Shader = (function() {
     return Shader;
 })();
 
-// src/core/spline.js
+// src/core\spline.js
 // from SplineInterpolator.cs in the Paint.NET source code
 
 function SplineInterpolator(points) {
@@ -460,7 +598,7 @@ SplineInterpolator.prototype.interpolate = function(x) {
         ((a * a * a - a) * this.y2[klo] + (b * b * b - b) * this.y2[khi]) * (h * h) / 6.0;
 };
 
-// src/core/texture.js
+// src/core\texture.js
 var Texture = (function() {
     Texture.fromElement = function(element) {
         var texture = new Texture(0, 0, gl.RGBA, gl.UNSIGNED_BYTE);
@@ -469,6 +607,7 @@ var Texture = (function() {
     };
 
     function Texture(width, height, format, type) {
+        this.gl = gl;
         this.id = gl.createTexture();
         this.width = width;
         this.height = height;
@@ -540,6 +679,9 @@ var Texture = (function() {
         gl.framebuffer = gl.framebuffer || gl.createFramebuffer();
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl.framebuffer);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.id, 0);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            throw new Error('incomplete framebuffer');
+        }
         gl.viewport(0, 0, this.width, this.height);
 
         // do the drawing
@@ -595,7 +737,7 @@ var Texture = (function() {
     return Texture;
 })();
 
-// src/filters/common.js
+// src/filters\common.js
 function warpShader(uniforms, warp) {
     return new Shader(null, uniforms + '\
     uniform sampler2D texture;\
@@ -621,7 +763,7 @@ var randomShaderFunc = '\
     }\
 ';
 
-// src/filters/adjust/brightnesscontrast.js
+// src/filters\adjust\brightnesscontrast.js
 /**
  * @filter           Brightness / Contrast
  * @description      Provides additive brightness and multiplicative contrast control.
@@ -654,7 +796,7 @@ function brightnessContrast(brightness, contrast) {
     return this;
 }
 
-// src/filters/adjust/color.js
+// src/filters\adjust\color.js
 /**
  * @filter           Color
  * @description      Give more or less importance to a color
@@ -689,7 +831,7 @@ function color(alpha,r,g,b) {
 
     return this;
 }
-// src/filters/adjust/coloradjust.js
+// src/filters\adjust\coloradjust.js
 /**
  * @filter           Color Adjust
  * @description      Provides min and max RGB chanel control.
@@ -730,7 +872,7 @@ function coloradjust(rmin, rmax, gmin, gmax, bmin, bmax) {
 
     return this;
 }
-// src/filters/adjust/curves.js
+// src/filters\adjust\curves.js
 function splineInterpolate(points) {
     var interpolator = new SplineInterpolator(points);
     var array = [];
@@ -796,7 +938,7 @@ function curves(red, green, blue) {
     return this;
 }
 
-// src/filters/adjust/denoise.js
+// src/filters\adjust\denoise.js
 /**
  * @filter         Denoise
  * @description    Smooths over grainy noise in dark images using an 9x9 box filter
@@ -841,7 +983,7 @@ function denoise(exponent) {
     return this;
 }
 
-// src/filters/adjust/exposure.js
+// src/filters\adjust\exposure.js
 /**
  * @filter           Exposure
  * @description      Allow control of image exposure
@@ -867,7 +1009,7 @@ function exposure(exposure) {
     return this;
 }
 
-// src/filters/adjust/gamma.js
+// src/filters\adjust\gamma.js
 /**
  * @filter           Gamma
  * @description      Allow control of image Gamma
@@ -895,7 +1037,7 @@ function gamma(gamma) {
     return this;
 }
 
-// src/filters/adjust/gammaRGB.js
+// src/filters\adjust\gammaRGB.js
 /**
  * @filter       GammaRGB
  * @description  Full controll of image Gamma similar to SVG feComponentTransferElement Gamma implementation
@@ -940,7 +1082,7 @@ function gammaRGB(amplitudeR, exponentR, offsetR ,amplitudeG,exponentG, offsetG,
 
     return this;
 }
-// src/filters/adjust/hue.js
+// src/filters\adjust\hue.js
 /**
  * @description Allow HUE rotation
  * @param hue Hue angle
@@ -977,7 +1119,7 @@ function hue(hue) {
     return this;
 }
 
-// src/filters/adjust/huesaturation.js
+// src/filters\adjust\huesaturation.js
 /**
  * @filter           Hue / Saturation
  * @description      Provides rotational hue and multiplicative saturation control. RGB color space
@@ -1030,7 +1172,7 @@ function hueSaturation(hue, saturation) {
     return this;
 }
 
-// src/filters/adjust/noise.js
+// src/filters\adjust\noise.js
 /**
  * @filter         Noise
  * @description    Adds black and white noise to the image.
@@ -1063,7 +1205,7 @@ function noise(amount) {
     return this;
 }
 
-// src/filters/adjust/sepia.js
+// src/filters\adjust\sepia.js
 /**
  * @filter         Sepia
  * @description    Gives the image a reddish-brown monochrome tint that imitates an old photograph.
@@ -1095,7 +1237,7 @@ function sepia(amount) {
     return this;
 }
 
-// src/filters/adjust/softcontrast.js
+// src/filters\adjust\softcontrast.js
 /**
  * @filter           Contrast
  * @description      Provides multiplicative contrast control.
@@ -1122,7 +1264,7 @@ function softContrast(contrast) {
     return this;
 }
 
-// src/filters/adjust/unsharpmask.js
+// src/filters\adjust\unsharpmask.js
 /**
  * @filter         Unsharp Mask
  * @description    A form of image sharpening that amplifies high-frequencies in the image. It
@@ -1165,7 +1307,7 @@ function unsharpMask(radius, strength) {
     return this;
 }
 
-// src/filters/adjust/vibrance.js
+// src/filters\adjust\vibrance.js
 /**
  * @filter       Vibrance
  * @description  Modifies the saturation of desaturated colors, leaving saturated colors unmodified.
@@ -1193,7 +1335,7 @@ function vibrance(amount) {
     return this;
 }
 
-// src/filters/adjust/vignette.js
+// src/filters\adjust\vignette.js
 /**
  * @filter         Vignette
  * @description    Adds a simulated lens edge darkening effect.
@@ -1224,7 +1366,7 @@ function vignette(size, amount) {
     return this;
 }
 
-// src/filters/blur/lensblur.js
+// src/filters\blur\lensblur.js
 /**
  * @filter           Lens Blur
  * @description      Imitates a camera capturing the image out of focus by using a blur that generates
@@ -1334,7 +1476,7 @@ function lensBlur(radius, brightness, angle) {
     return this;
 }
 
-// src/filters/blur/tiltshift.js
+// src/filters\blur\tiltshift.js
 /**
  * @filter               Tilt Shift
  * @description          Simulates the shallow depth of field normally encountered in close-up
@@ -1414,7 +1556,7 @@ function tiltShift(startX, startY, endX, endY, blurRadius, gradientRadius) {
     return this;
 }
 
-// src/filters/blur/triangleblur.js
+// src/filters\blur\triangleblur.js
 /**
  * @filter       Triangle Blur
  * @description  This is the most basic blur filter, which convolves the image with a
@@ -1464,7 +1606,7 @@ function triangleBlur(radius) {
     return this;
 }
 
-// src/filters/blur/zoomblur.js
+// src/filters\blur\zoomblur.js
 /**
  * @filter         Zoom Blur
  * @description    Blurs the image away from a certain point, which looks like radial motion blur.
@@ -1517,7 +1659,7 @@ function zoomBlur(centerX, centerY, strength) {
     return this;
 }
 
-// src/filters/fun/colorhalftone.js
+// src/filters\fun\colorhalftone.js
 /**
  * @filter        Color Halftone
  * @description   Simulates a CMYK halftone rendering of the image by multiplying pixel values
@@ -1568,7 +1710,7 @@ function colorHalftone(centerX, centerY, angle, size) {
     return this;
 }
 
-// src/filters/fun/dotscreen.js
+// src/filters\fun\dotscreen.js
 /**
  * @filter        Dot Screen
  * @description   Simulates a black and white halftone rendering of the image by multiplying
@@ -1614,7 +1756,7 @@ function dotScreen(centerX, centerY, angle, size) {
     return this;
 }
 
-// src/filters/fun/edgework.js
+// src/filters\fun\edgework.js
 /**
  * @filter       Edge Work
  * @description  Picks out different frequencies in the image by subtracting two
@@ -1689,7 +1831,7 @@ function edgeWork(radius) {
     return this;
 }
 
-// src/filters/fun/hexagonalpixelate.js
+// src/filters\fun\hexagonalpixelate.js
 /**
  * @filter        Hexagonal Pixelate
  * @description   Renders the image using a pattern of hexagonal tiles. Tile colors
@@ -1750,7 +1892,7 @@ function hexagonalPixelate(centerX, centerY, scale) {
     return this;
 }
 
-// src/filters/fun/hsv.js
+// src/filters\fun\hsv.js
 /**
  * @description  transform image to HSV
  */
@@ -1811,7 +1953,7 @@ function toHSV() {
 
     return this;
 }
-// src/filters/fun/ink.js
+// src/filters\fun\ink.js
 /**
  * @filter         Ink
  * @description    Simulates outlining the image in ink by darkening edges stronger than a
@@ -1860,7 +2002,7 @@ function ink(strength) {
     return this;
 }
 
-// src/filters/fun/invertcolor.js
+// src/filters\fun\invertcolor.js
 /**
  * @description Invert the colors!
  */
@@ -1878,7 +2020,7 @@ function invertColor() {
     simpleShader.call(this, gl.invertColor, {});
     return this;
 }
-// src/filters/fun/mirror.js
+// src/filters\fun\mirror.js
 /**
  * @filter           Mirror
  * @description      mirror rhe image horizontaly
@@ -1899,7 +2041,7 @@ function mirror() {
 
     return this;
 }
-// src/filters/fun/sobel.js
+// src/filters\fun\sobel.js
 /**
  * @description Sobel implementation of image with alpha and line color control
  * @param secondary (0 to 1), indice of sobel strength
@@ -1962,7 +2104,7 @@ function sobel(secondary, coef, alpha, r,g,b,a, r2,g2,b2, a2) {
             gl_FragColor = color;\
         }\
     ');
-    console.log(arguments);
+
     simpleShader.call(this, gl.sobel, {
         secondary : secondary,
         coef : coef,
@@ -1979,7 +2121,8 @@ function sobel(secondary, coef, alpha, r,g,b,a, r2,g2,b2, a2) {
 
     return this;
 }
-// src/filters/warp/bulgepinch.js
+
+// src/filters\warp\bulgepinch.js
 /**
  * @filter         Bulge / Pinch
  * @description    Bulges or pinches the image in a circle.
@@ -2017,7 +2160,7 @@ function bulgePinch(centerX, centerY, radius, strength) {
     return this;
 }
 
-// src/filters/warp/matrixwarp.js
+// src/filters\warp\matrixwarp.js
 /**
  * @filter                Matrix Warp
  * @description           Transforms an image by a 2x2 or 3x3 matrix. The coordinates used in
@@ -2067,7 +2210,7 @@ function matrixWarp(matrix, inverse, useTextureSpace) {
     return this;
 }
 
-// src/filters/warp/perspective.js
+// src/filters\warp\perspective.js
 /**
  * @filter       Perspective
  * @description  Warps one quadrangle to another with a perspective transform. This can be used to
@@ -2085,7 +2228,7 @@ function perspective(before, after) {
     return this.matrixWarp(c);
 }
 
-// src/filters/warp/swirl.js
+// src/filters\warp\swirl.js
 /**
  * @filter        Swirl
  * @description   Warps a circular region of the image in a swirl.
