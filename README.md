@@ -1,6 +1,6 @@
 # glfx.js
 
-Created By Evan Wallace - 2011
+Created By Evan Wallace - 2011  
 Updated by Pierre-Loic Doulcet (hexapode) - 2014, Joachim de Fourestier (joedf) - 2019
 
 Available filters and shader functions:
